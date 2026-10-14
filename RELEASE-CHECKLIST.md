@@ -95,7 +95,7 @@ itself, since no GPL code is copied into it, as far as I can tell.
 
 | Component | License (as far as known) | Needed |
 |-----------|---------------------------|--------|
-| Original scripts, defconfigs, overlay, docs | Apache-2.0 (proposed); copyright holder to be set | `LICENSE`, SPDX headers |
+| Original scripts, defconfigs, overlay, docs | MIT (`LICENSE`, (c) 2026 Arjan Scherpenisse) | `LICENSE`, SPDX headers |
 | `scripts/mkbootimg.py` | Written for this repo (assumed; it reimplements the Android boot header v0 format). If any code was copied from AOSP mkbootimg: Apache-2.0 notice required | confirm origin (unsure) |
 | `diag/fbdmesg.c` | Original (assumed) | header |
 | `diag/font8x16.h` | Generated from `Lat15-Fixed16.psf` (console font). Console fonts are usually derived from the public-domain misc-fixed fonts, but I have not verified | check origin, or replace with your own font; keep the note |

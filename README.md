@@ -144,9 +144,9 @@ Flash your own boot image backup, erase userdata, extract your `/data` backup.
 
 ## License and third-party notices
 
-**No LICENSE file exists yet** (see [RELEASE-CHECKLIST.md](RELEASE-CHECKLIST.md)).
-The intent is Apache-2.0 for the original files in this repo, like other Nerves
-systems. Components and their licenses (summary, not legal advice):
+The original files in this repo are MIT-licensed, see [LICENSE](LICENSE). This
+does not cover the third-party components below (including `diag/font8x16.h`).
+Components and their licenses (summary, not legal advice):
 
 * Nerves, `nerves_system_br`: Apache-2.0 plus Buildroot-derived parts.
 * Buildroot and the packages it builds (BusyBox, mtd-utils, musl, GCC,
