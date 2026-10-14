@@ -37,3 +37,6 @@ id_ed25519*
 
 # Built helper binary (build from diag/fbdmesg.c)
 diag/fbdmesg
+
+# Internal pre-release review notes
+/RELEASE-CHECKLIST.md

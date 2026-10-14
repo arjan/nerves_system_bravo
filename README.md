@@ -175,7 +175,6 @@ Components and their licenses (summary, not legal advice):
 ## Contributing
 
 Issues and pull requests are welcome, especially: other ROM/kernel
-combinations, other Wi-Fi security modes, and portability fixes
-listed in [RELEASE-CHECKLIST.md](RELEASE-CHECKLIST.md). Please say which phone
+combinations, other Wi-Fi security modes, and portability fixes. Please say which phone
 revision and ROM you tested on, and never attach backups, firmware blobs or
 kernel images.

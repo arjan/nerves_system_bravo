@@ -47,4 +47,3 @@ camera, Bluetooth, audio, GPS, modem. fwup updates. Prebuilt artifacts (none exi
 * `board/boot-stock.img` is required for the build and must be supplied.
 * The example firmware (`bravo_hello`) has unfinished Emerge UI path
   dependencies on the author's machine.
-* See `RELEASE-CHECKLIST.md` for the pre-release audit.
