@@ -145,7 +145,7 @@ Flash your own boot image backup, erase userdata, extract your `/data` backup.
 ## License and third-party notices
 
 The original files in this repo are MIT-licensed, see [LICENSE](LICENSE). This
-does not cover the third-party components below (including `diag/font8x16.h`).
+does not cover the third-party components below.
 Components and their licenses (summary, not legal advice):
 
 * Nerves, `nerves_system_br`: Apache-2.0 plus Buildroot-derived parts.
@@ -159,7 +159,9 @@ Components and their licenses (summary, not legal advice):
 * Broadcom BCM4329 firmware and `bcm4329.ko`: proprietary/vendor, **never
   distributed here**; copy them from your own phone.
 * `diag/font8x16.h`: generated from `Lat15-Fixed16.psf` (from the Linux
-  console fonts); its license has not been checked (unverified).
+  console fonts, Debian `console-setup-linux`). Debian states its console fonts
+  are public domain, and `Fixed` derives from the X11 misc-fixed fonts, which
+  are public domain as far as known; the exact BDF source was not verified.
 
 ## Credits
 
