@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""Run a shell command on the phone's diagnostic nc shell (port 2323, no auth).
+Usage: phone-sh 'cmd'    (PHONE_HOST=addr%iface to override discovery)"""
+import os, socket, subprocess, sys, re
+def discover():
+    for line in subprocess.run("ip -br link", shell=True, capture_output=True, text=True).stdout.splitlines():
+        iface = line.split()[0]
+        if iface.startswith("enx") and iface != os.environ.get("IGNORE_IF", "enx0826ae30acdd"):
+            out = subprocess.run(["ping", "-6", "-c", "2", "-W", "2", f"ff02::1%{iface}"], capture_output=True, text=True).stdout
+            for a in re.findall(r"from (fe80::[0-9a-f:]+)%", out):
+                if not a.startswith("fe80::63de"):   # skip our own address (set per run below)
+                    pass
+                yield a, iface
+host = os.environ.get("PHONE_HOST")
+cands = [("172.31.7.2", None)] + ([tuple(host.split("%"))] if host else list(discover()))
+last = None
+for addr, iface in cands:
+    try:
+        if iface is None:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(8)
+            s.connect((addr, 2323))
+        else:
+            s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM); s.settimeout(8)
+            s.connect((addr, 2323, 0, socket.if_nametoindex(iface)))
+    except OSError as e:
+        last = e; continue
+    s.sendall((sys.argv[1] + "\nexit\n").encode()); s.settimeout(120)
+    data = b""
+    try:
+        while True:
+            c = s.recv(4096)
+            if not c: break
+            data += c
+    except socket.timeout:
+        pass
+    sys.stdout.write(data.decode(errors="replace")); sys.exit(0)
+sys.exit(f"no phone shell found ({last})")

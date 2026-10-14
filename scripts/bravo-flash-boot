@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Flash the boot partition (mtd2) of a RUNNING bravo, over ssh.
+
+  bravo-flash-boot <boot.img> [--host 172.31.89.145] [--reboot]
+
+1. streams the image (base64 lines via `ssh host '<elixir>'`) to /tmp/boot.img
+2. compares its sha256 ON THE PHONE and aborts before touching flash if it differs
+3. flash_erase + nandwrite -p on /dev/mtd2 in a single remote call
+4. reads /dev/mtd2ro back and compares sha256 again
+Never reboots unless --reboot is given, and not after a failed verification.
+If the verification fails, do NOT reboot: boot Recovery (Volume Down + Power)
+and flash bravo-backup/boot-mtd2.img or the intended image from there.
+"""
+import argparse, base64, hashlib, re, subprocess, sys
+
+SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
+       "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+       "-o", "LogLevel=ERROR"]
+CHUNK = 24 * 1024
+
+
+def ssh(host, expr, stdin=None, timeout=600):
+    r = subprocess.run(SSH + [host, expr], input=stdin, capture_output=True, text=True, timeout=timeout)
+    return r.stdout
+
+
+def last_hash(out):
+    """The remote call prints the hash, then ssh echoes the return value (':ok')."""
+    hs = [l for l in out.splitlines() if re.fullmatch(r"[0-9a-f]{64}", l.strip())]
+    return hs[-1].strip() if hs else None
+
+
+ap = argparse.ArgumentParser()
+ap.add_argument("image")
+ap.add_argument("--host", default="172.31.89.145")
+ap.add_argument("--reboot", action="store_true")
+a = ap.parse_args()
+
+img = open(a.image, "rb").read()
+want = hashlib.sha256(img).hexdigest()
+if len(img) > 0x300000:
+    sys.exit("image is larger than the 3 MB boot partition")
+print(f"image {a.image}: {len(img)} bytes, sha256 {want}")
+
+sha_expr = ('IO.puts(:crypto.hash(:sha256, File.read!("%s")) |> Base.encode16(case: :lower))')
+cur = ssh(a.host, ('{:ok, f} = File.open("/dev/mtd2ro", [:read, :binary, :raw]); {:ok, b} = :file.read(f, %d); '
+                   'IO.puts(:crypto.hash(:sha256, b) |> Base.encode16(case: :lower))') % len(img))
+print("current boot partition sha256 (same length):", last_hash(cur))
+
+staged = last_hash(ssh(a.host, 'IO.puts(case File.read("/tmp/boot.img") do {:ok, b} -> :crypto.hash(:sha256, b) |> Base.encode16(case: :lower); _ -> "none" end)'))
+if staged == want:
+    print("== /tmp/boot.img already staged and verified on the phone, skipping transfer")
+else:
+    print("== sending to /tmp/boot.img")
+    b64 = base64.b64encode(img).decode()
+    step = CHUNK * 4 // 3
+    for n, i in enumerate(range(0, len(b64), step)):
+        ssh(a.host, 'File.write!("/tmp/boot.img", (IO.gets("") |> to_string() |> String.trim() |> Base.decode64!()), %s)'
+            % ("[]" if n == 0 else "[:append]"), stdin=b64[i:i + step] + "\n")
+        if n % 20 == 0:
+            print(f"   {min(i + step, len(b64)) * 3 // 4} / {len(img)} bytes", flush=True)
+    got = last_hash(ssh(a.host, sha_expr % "/tmp/boot.img"))
+    if got != want:
+        sys.exit(f"CHECKSUM MISMATCH on phone ({got}) - nothing written to flash")
+    print("staged image verified on the phone")
+
+print("== erase + write /dev/mtd2")
+out = ssh(a.host, 'case System.cmd("/usr/sbin/flash_erase", ["/dev/mtd2", "0", "0"], stderr_to_stdout: true) do '
+                  '{_, 0} -> IO.inspect(System.cmd("/usr/sbin/nandwrite", ["-p", "/dev/mtd2", "/tmp/boot.img"], stderr_to_stdout: true), label: "nandwrite"); '
+                  '{o, c} -> IO.puts("flash_erase failed #{c}: #{o}") end')
+print(out.strip()[-400:])
+
+back = ssh(a.host, ('{:ok, f} = File.open("/dev/mtd2ro", [:read, :binary, :raw]); {:ok, b} = :file.read(f, %d); '
+                    'IO.puts(:crypto.hash(:sha256, b) |> Base.encode16(case: :lower))') % len(img))
+back = last_hash(back)
+if back == want:
+    print("VERIFIED: boot partition now matches", a.image)
+else:
+    print("READBACK MISMATCH:", back, "- do NOT reboot; use Recovery")
+    sys.exit(1)
+if a.reboot:
+    ssh(a.host, "Nerves.Runtime.reboot()")
+    print("rebooting")

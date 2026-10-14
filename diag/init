@@ -1,0 +1,88 @@
+#!/bin/busybox sh
+# Diagnostic PID 1 (ramdisk) for bring-up. Works on the stock 2.6.37 kernel and on
+# the 3.0.16 kernel. Prints on the console, keeps copies of dmesg and its own
+# log on the NAND rootfs (k3-dmesg.txt / k3-diag.txt, readable from recovery),
+# brings up USB networking and an unauthenticated nc shell on :2323.
+/bin/busybox --install -s /bin
+export PATH=/bin:/sbin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+
+# /dev: devtmpfs on the 3.0 kernel; tmpfs + mdev on the old one
+if ! mount -t devtmpfs devtmpfs /dev 2>/dev/null; then
+    mount -t tmpfs tmpfs /dev
+    echo /bin/mdev > /proc/sys/kernel/hotplug
+    mdev -s
+fi
+[ -e /dev/console ] && exec >/dev/console 2>&1 </dev/console
+[ -e /dev/fb0 ] || mknod /dev/fb0 c 29 0
+
+: > /diag.log
+log() { echo "$*"; echo "$*" >> /diag.log; }
+log "diag init: kernel $(cut -d' ' -f3 /proc/version)"
+log "cmdline: $(cat /proc/cmdline)"
+
+# 1. root filesystem first, so evidence survives whatever fails later
+mkdir -p /mnt/root
+if mount -t yaffs2 /dev/mtdblock5 /mnt/root; then
+    log "rootfs mounted rw: $(ls /mnt/root | tr '\n' ' ')"
+    ( while :; do dmesg > /mnt/root/k3-dmesg.txt; cp /diag.log /mnt/root/k3-diag.txt; sync; sleep 3; done ) &
+else
+    log "rootfs mount FAILED"
+fi
+
+# 2. on-screen log for the old kernel (it has no fbcon)
+[ -d /sys/class/graphics/fbcon ] || fbdmesg &
+
+# 3. USB networking
+# 3.0.x HTC gadget: functions are switched per function (functions_store is a stub)
+( # in the background: this call may block inside the kernel, and must not stall the rest
+  if [ -e /sys/class/android_usb/f_rndis/on ]; then
+    log "f_rndis/on before: $(cat /sys/class/android_usb/f_rndis/on)"
+    echo 1 > /sys/class/android_usb/f_rndis/on
+    log "f_rndis/on write returned rc=$?"
+    log "f_rndis/on after: $(cat /sys/class/android_usb/f_rndis/on) state=$(cat /sys/class/android_usb/android0/state)"
+  elif [ -e /sys/class/usb_composite/rndis/enable ]; then
+    echo 1 > /sys/class/usb_composite/rndis/enable && log "usb_composite rndis enabled"
+  else
+    log "no USB gadget control found"
+  fi
+) &
+sleep 3
+log "net: $(ls /sys/class/net | tr '\n' ' ')"
+ifconfig usb0 172.31.7.2 netmask 255.255.255.0 up && log "usb0 172.31.7.2 up" || log "ifconfig usb0 failed"
+
+# 4. remote shells (each logs how it ended; rc=139 means SIGSEGV)
+( nc -ll -p 2323 -e /bin/sh; log "nc exited rc=$?" ) &
+( telnetd -F -l /bin/sh -p 2324; log "telnetd exited rc=$?" ) &
+log "shells started: nc :2323, telnetd :2324"
+
+# 5. self-test: which applets crash on this kernel?
+t() { "$@" > /dev/null 2>&1; rc=$?; log "selftest rc=$rc: $*"; }
+t cat /proc/mtd
+t cat /proc/version
+t ls /sys/class/net
+t dmesg
+t cp /diag.log /tmp/selftest.copy
+t sh -c 'echo x | tr x y'
+t ifconfig -a
+t nc -h
+t mount
+log "mtd: $(cat /proc/mtd | tr '\n' ' ')"
+log "fb0: $(cat /sys/class/graphics/fb0/bits_per_pixel 2>&1) bpp, size $(cat /sys/class/graphics/fb0/virtual_size 2>&1), stride $(cat /sys/class/graphics/fb0/stride 2>&1)"
+
+# 6. The kernel log is hundreds of lines and the console scrolls it past in a
+# second, so page through it slowly: first this script's own log, then dmesg.
+while :; do
+    { cat /diag.log; echo "=== dmesg ==="; dmesg 2>&1; } > /tmp/pages.txt
+    n=$(wc -l < /tmp/pages.txt)
+    start=1
+    while [ $start -le $n ]; do
+        printf '\033[2J\033[H'
+        echo "--- lines $start-$((start+43)) of $n (pages change every 12 s) ---"
+        sed -n "${start},$((start+43))p" /tmp/pages.txt
+        start=$((start+44))
+        sleep 12
+    done
+done

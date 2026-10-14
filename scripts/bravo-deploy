@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Deploy a rootfs tar (from scripts/bravo-image) to a RUNNING bravo over ssh.
+
+NervesSSH on this system has no sftp and fwup cannot write this NAND, so files
+are streamed as base64 lines through `ssh host '<elixir>'` (stdin is readable
+via IO.gets). Only files whose sha256 differs from the phone are sent.
+
+  bravo-deploy <userdata.tar> [--host 172.31.89.145] [--apply] [--reboot]
+
+Without --apply it only prints what would change (dry run).
+Extra files on the phone are only removed if listed in --remove (never
+automatically), and /dev, /root, /tmp, /run, /proc, /sys are never touched.
+"""
+import argparse, base64, hashlib, io, os, subprocess, sys, tarfile
+
+SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
+       "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+       "-o", "LogLevel=ERROR"]
+SKIP = ("dev/", "root/", "tmp/", "run/", "proc/", "sys/", "boot-", "diag.log")
+CHUNK = 96 * 1024                      # raw bytes per ssh round trip (base64 line ~128 KB)
+
+
+def ssh(host, expr, stdin=None, timeout=300):
+    r = subprocess.run(SSH + [host, expr], input=stdin, capture_output=True,
+                       text=True, timeout=timeout)
+    return r.stdout
+
+
+def remote_sums(host, paths):
+    """sha256 of each path on the phone (None if missing / not a regular file)."""
+    lst = "[" + ",".join('"%s"' % p for p in paths) + "]"
+    expr = ('for p <- %s do h = case File.read("/" <> p) do {:ok, b} -> :crypto.hash(:sha256, b) '
+            '|> Base.encode16(case: :lower); _ -> "-" end; IO.puts(p <> " " <> h) end') % lst
+    out = ssh(host, expr)
+    res = {}
+    for line in out.splitlines():
+        if " " in line and not line.startswith(":"):
+            p, h = line.rsplit(" ", 1)
+            res[p] = None if h == "-" else h
+    return res
+
+
+def send_file(host, path, data, mode):
+    tmp = "/%s.bravo-new" % path
+    dest = "/" + path
+    b64 = base64.b64encode(data).decode()
+    step = CHUNK * 4 // 3
+    decode = '(IO.gets("") |> to_string() |> String.trim() |> Base.decode64!())'
+    finish = 'File.chmod!("%s", 0o%o); File.rename!("%s", "%s")' % (tmp, mode & 0o7777, tmp, dest)
+    mkdir = 'File.mkdir_p!("%s")' % os.path.dirname(dest)
+    if len(b64) <= step:
+        # small file: a single round trip (create dirs, write, chmod, rename into place)
+        ssh(host, '%s; File.write!("%s", %s); %s' % (mkdir, tmp, decode, finish), stdin=b64 + "\n")
+        return
+    first = True
+    for i in range(0, len(b64), step):
+        pre = mkdir + "; " if first else ""
+        ssh(host, '%sFile.write!("%s", %s, %s)' % (pre, tmp, decode, "[]" if first else "[:append]"),
+            stdin=b64[i:i + step] + "\n")
+        first = False
+    ssh(host, finish)
+
+
+def remote_links(host, paths):
+    """Symlink target of each path on the phone (None when missing or not a link)."""
+    lst = "[" + ",".join('"%s"' % p for p in paths) + "]"
+    expr = ('for p <- %s do t = case File.read_link("/" <> p) do {:ok, t} -> t; _ -> "-" end; IO.puts(p <> " " <> t) end') % lst
+    res = {}
+    for line in ssh(host, expr).splitlines():
+        if " " in line and not line.startswith(":"):
+            p, t = line.rsplit(" ", 1)
+            res[p] = None if t == "-" else t
+    return res
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("tar")
+    ap.add_argument("--host", default="172.31.89.145")
+    ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--reboot", action="store_true")
+    ap.add_argument("--remove", nargs="*", default=[], help="paths (no leading /) to delete on the phone")
+    a = ap.parse_args()
+
+    files = {}
+    links = {}
+    with tarfile.open(a.tar) as t:
+        for m in t.getmembers():
+            name = m.name[2:] if m.name.startswith("./") else m.name
+            if not name or name.startswith(SKIP):
+                continue
+            if not name.isascii() or '"' in name or "\\" in name:
+                print(f"  skipping (unsupported file name): {name!r}")
+                continue
+            if m.isreg():
+                files[name] = (hashlib.sha256(t.extractfile(m).read()).hexdigest(), m.mode, m)
+            elif m.issym() and m.linkname.isascii() and '"' not in m.linkname:
+                links[name] = m.linkname
+    names = sorted(files)
+    have = {}
+    for i in range(0, len(names), 150):
+        have.update(remote_sums(a.host, names[i:i + 150]))
+    todo = [n for n in names if have.get(n) != files[n][0]]
+    have_links = {}
+    lnames = sorted(links)
+    for i in range(0, len(lnames), 150):
+        have_links.update(remote_links(a.host, lnames[i:i + 150]))
+    link_todo = [n for n in lnames if have_links.get(n) != links[n]]
+    print(f"{len(names)} files in tar, {len(todo)} differ from the phone; {len(link_todo)} of {len(lnames)} symlinks differ")
+    for n in todo:
+        state = "new" if have.get(n) is None else "changed"
+        print(f"  {state:8s} {n}")
+    for n in link_todo:
+        print(f"  symlink  {n} -> {links[n]}")
+    if a.remove:
+        print("  to remove:", ", ".join(a.remove))
+    if not a.apply:
+        print("dry run: nothing written (use --apply)")
+        return
+    with tarfile.open(a.tar) as t:
+        for n in todo:
+            m = files[n][2]
+            send_file(a.host, n, t.extractfile(m).read(), m.mode)
+            print("  sent", n)
+    for n in link_todo:
+        ssh(a.host, 'File.mkdir_p!("%s"); File.rm("/%s"); File.ln_s!("%s", "/%s")' % (os.path.dirname("/" + n), n, links[n], n))
+        print("  linked", n)
+    for p in a.remove:
+        ssh(a.host, 'File.rm("/%s")' % p)
+        print("  removed", p)
+    ok = {n: files[n][0] for n in todo}
+    bad = list(ok)
+    for attempt in range(3):          # transient ssh failures happen: verify, resend what is wrong
+        got = remote_sums(a.host, bad) if bad else {}
+        bad = [n for n in bad if got.get(n) != ok[n]]
+        if not bad:
+            break
+        print(f"  retry {attempt + 1}: resending {len(bad)} file(s): {', '.join(bad)}")
+        with tarfile.open(a.tar) as t:
+            for n in bad:
+                m = files[n][2]
+                send_file(a.host, n, t.extractfile(m).read(), m.mode)
+    else:
+        got = remote_sums(a.host, bad) if bad else {}
+        bad = [n for n in bad if got.get(n) != ok[n]]
+    print("VERIFIED all sent files" if not bad else "MISMATCH: " + ", ".join(bad))
+    if bad:
+        sys.exit(1)
+    if a.reboot:
+        ssh(a.host, "Nerves.Runtime.reboot()")
+        print("rebooting")
+
+
+main()

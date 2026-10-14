@@ -1,0 +1,16 @@
+#!/bin/sh
+# Run by erlinit via "-s" (--alternate-exec): erlinit starts this *instead of*
+# erlexec and passes erlexec and its arguments to us, so we must exec "$@".
+
+# No devtmpfs in the stock kernel: use a tmpfs /dev filled in by mdev.
+mount -t tmpfs -o mode=755,size=1024k,nosuid tmpfs /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts -o gid=5,mode=620,noexec,nosuid devpts /dev/pts
+chmod 1777 /dev/shm
+echo /sbin/mdev > /proc/sys/kernel/hotplug
+mdev -s
+
+# USB gadget: HTC's 2.6.37 android gadget is switched via usb_composite
+echo 1 > /sys/class/usb_composite/rndis/enable 2>/dev/null
+
+exec "$@"

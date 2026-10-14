@@ -1,0 +1,23 @@
+#!/bin/sh
+# Debug PID 1 for the HTC Desire: leave evidence on the rootfs, then hand over
+# to erlinit. Installed by `BRAVO_DEBUG=1 scripts/bravo-image`, booted with
+# init=/sbin/bravo-boot. Read the logs by mounting userdata in recovery.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+
+exec >/boot-stdout.txt 2>&1
+echo "bravo-boot: pid=$$ $(date)"
+uname -a
+cat /proc/cmdline
+cat /proc/mounts
+
+# Enumerate on USB as early as possible, even if erlinit fails later
+echo 1 > /sys/class/usb_composite/rndis/enable && echo "rndis enabled"
+
+# Keep a copy of the kernel log on flash while we still can
+( while :; do dmesg > /boot-dmesg.txt; sync; sleep 2; done ) &
+
+echo "bravo-boot: exec erlinit"
+exec /sbin/init

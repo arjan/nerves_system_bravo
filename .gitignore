@@ -1,0 +1,39 @@
+/.build/
+/_build/
+/deps/
+/images/
+*.img
+*.fw
+erl_crash.dump
+
+# Added for the public release
+/.nerves/
+.nerves/
+board/*.img
+diag/*.img
+build.log
+*.log
+
+# Never commit device backups, dumps, firmware blobs, kernel modules or keys
+/bravo-backup/
+*.bak
+*.backup
+*.dump
+*.dmp
+*.ko
+fw_*.bin
+nvram*.txt
+boot-mtd*.img
+data-backup*.tar
+userdata.tar
+rootfs.tar
+*.tar.gz
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*.priv
+.env
+
+# Built helper binary (build from diag/fbdmesg.c)
+diag/fbdmesg

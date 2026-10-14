@@ -1,0 +1,23 @@
+#!/bin/sh
+# Build a diagnostic boot.img: stock kernel + a ramdisk that shows the kernel
+# log on screen and offers telnet over USB (RNDIS). Does not use the NAND rootfs.
+# Usage: mkdiag-image <static busybox> <output boot.img>
+set -e
+unset CDPATH
+HERE=$(cd "$(dirname "$0")" && pwd)
+BB=$1
+OUT=$2
+[ -f "$BB" ] && [ -n "$OUT" ] || { echo "usage: $0 <busybox> <boot.img>"; exit 1; }
+STOCK_BOOT=${STOCK_BOOT:-$HERE/../board/boot-stock.img}
+FBDMESG=${FBDMESG:-$HERE/fbdmesg}
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/rd/tmp" "$WORK/rd/bin" "$WORK/rd/proc" "$WORK/rd/sys" "$WORK/rd/dev" "$WORK/rd/etc" "$WORK/rd/mnt"
+install -m 755 "$BB" "$WORK/rd/bin/busybox"
+install -m 755 "$FBDMESG" "$WORK/rd/bin/fbdmesg"
+install -m 755 "$HERE/init" "$WORK/rd/init"
+(cd "$WORK/rd" && find . | cpio -o -H newc --owner 0:0 2>/dev/null | gzip -9 > "$WORK/ramdisk.gz")
+if [ -n "$KERNEL" ]; then cp "$KERNEL" "$WORK/zImage"; else python3 -I "$HERE/../scripts/extract-kernel.py" "$STOCK_BOOT" "$WORK/zImage"; fi
+python3 -I "$HERE/../scripts/mkbootimg.py" --kernel "$WORK/zImage" --ramdisk "$WORK/ramdisk.gz" \
+    --base-from "$STOCK_BOOT" \
+    --cmdline "${CMDLINE:-no_console_suspend=1 msmsdcc_sdioirq=1 wire.search_count=5}" -o "$OUT"

@@ -1,0 +1,66 @@
+#!/bin/sh
+# Convert a Nerves firmware (.fw) built for nerves_system_bravo into the images
+# that get flashed to the HTC Desire:
+#
+#   boot.img      stock kernel + cmdline pointing at the YAFFS2 rootfs
+#   userdata.tar  rootfs tree (extract onto a freshly erased, yaffs2-mounted
+#                 "userdata" partition (mtd5) so that the phone's own kernel
+#                 driver writes the YAFFS2 tags/ECC; raw mkyaffs2 images do not
+#                 match this NAND's OOB layout and flash_image ignores OOB)
+#
+# Usage: bravo-image <firmware.fw> <output dir>
+# Needs: unzip, unsquashfs, fakeroot, tar, cpio, gzip, python3.
+set -e
+unset CDPATH
+
+FW=$1
+OUT=$2
+[ -f "$FW" ] && [ -n "$OUT" ] || { echo "usage: $0 <firmware.fw> <outdir>"; exit 1; }
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+SYS=${NERVES_SYSTEM:-$(cd "$HERE/.." && pwd)}
+STOCK_BOOT=${STOCK_BOOT:-$SYS/images/boot-stock.img}
+[ -f "$STOCK_BOOT" ] || { echo "stock boot image not found: $STOCK_BOOT"; exit 1; }
+
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
+FW=$(cd "$(dirname "$FW")" && pwd)/$(basename "$FW")
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+unzip -q -o "$FW" data/rootfs.img -d "$WORK"
+
+# Everything that needs fake root (device nodes, ownership) runs in one session
+# so that tar sees what unsquashfs and mknod produced.
+WORK=$WORK OUT=$OUT HERE=$HERE BRAVO_DEBUG=$BRAVO_DEBUG fakeroot sh -ec '
+    unsquashfs -no-progress -d "$WORK/rootfs" "$WORK/data/rootfs.img" >/dev/null
+    cd "$WORK/rootfs"
+    mkdir -p dev
+    mknod -m 600 dev/console c 5 1
+    mknod -m 666 dev/null c 1 3
+    mknod -m 666 dev/zero c 1 5
+    mknod -m 666 dev/tty c 5 0
+    mknod -m 666 dev/urandom c 1 9
+    mknod -m 666 dev/random c 1 8
+    mknod -m 600 dev/ttyMSM0 c 250 0
+    mknod -m 600 dev/mtdblock4 b 31 4
+    mknod -m 600 dev/mtdblock5 b 31 5
+    if [ -n "$BRAVO_DEBUG" ]; then
+        install -m 755 "$HERE/bravo-boot" sbin/bravo-boot
+    fi
+    tar --numeric-owner -cpf "$OUT/userdata.tar" -C "$WORK/rootfs" .
+'
+
+INIT=/sbin/init
+[ -n "$BRAVO_DEBUG" ] && INIT=/sbin/bravo-boot
+
+# Boot image: reuse the stock kernel, replace ramdisk and command line.
+python3 -I "$HERE/extract-kernel.py" "$STOCK_BOOT" "$WORK/zImage"
+printf '' | cpio -o -H newc 2>/dev/null | gzip -9 > "$WORK/empty.cpio.gz"
+python3 -I "$HERE/mkbootimg.py" \
+    --kernel "$WORK/zImage" --ramdisk "$WORK/empty.cpio.gz" \
+    --base-from "$STOCK_BOOT" \
+    --cmdline "root=/dev/mtdblock5 rootfstype=yaffs2 rw init=$INIT no_console_suspend=1 msmsdcc_sdioirq=1 wire.search_count=5" \
+    -o "$OUT/boot.img"
+
+ls -l "$OUT"

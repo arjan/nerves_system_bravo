@@ -1,0 +1,62 @@
+#!/bin/sh
+# Flash the boot partition of the phone from the *running diagnostic system*,
+# over the USB network, without going through recovery.
+#
+#   diag/flash-boot-usb <boot.img> [--reboot]
+#
+# Steps: send image (nc :2324) -> sha256 check on the phone -> flash_erase +
+# nandwrite on /dev/mtd2 -> read back and compare -> optional reboot.
+# If anything fails the phone can still be recovered through the bootloader
+# (Volume Down + Power -> Recovery) with ../../bravo-backup/boot-mtd2.img.
+set -e
+unset CDPATH
+HERE=$(cd "$(dirname "$0")" && pwd)
+IMG=$1
+[ -f "$IMG" ] || { echo "usage: $0 <boot.img> [--reboot]"; exit 1; }
+SIZE=$(stat -c %s "$IMG")
+[ "$SIZE" -le 3145728 ] || { echo "image larger than the 3 MB boot partition"; exit 1; }
+PAGES=$(( (SIZE + 2047) / 2048 ))
+WANT=$(sha256sum "$IMG" | cut -d' ' -f1)
+sh_() { "$HERE/phone-sh" "$1"; }
+
+echo "== receiver on phone"
+sh_ 'rm -f /tmp/boot.img; (setsid nc -l -p 2324 > /tmp/boot.img 2>/dev/null &); sleep 1; echo listening' | tail -1
+python3 -I - "$IMG" <<'PY'
+import re, socket, subprocess, sys
+img = open(sys.argv[1], "rb").read()
+for line in subprocess.run("ip -br link", shell=True, capture_output=True, text=True).stdout.splitlines():
+    i = line.split()[0]
+    if i.startswith("enx") and i != "enx0826ae30acdd":
+        out = subprocess.run(["ping", "-6", "-c", "2", "-W", "2", f"ff02::1%{i}"],
+                             capture_output=True, text=True).stdout
+        for a in dict.fromkeys(re.findall(r"from (fe80::[0-9a-f:]+)%", out)):
+            try:
+                s = socket.socket(socket.AF_INET6)
+                s.settimeout(8)
+                s.connect((a, 2324, 0, socket.if_nametoindex(i)))
+                s.sendall(img)
+                s.close()
+                print("sent", len(img), "bytes")
+                sys.exit(0)
+            except OSError:
+                pass
+sys.exit("could not reach receiver")
+PY
+echo "== checksum on phone"
+GOT=$(sh_ 'sleep 2; sha256sum /tmp/boot.img' | tail -1 | cut -d' ' -f1)
+[ "$GOT" = "$WANT" ] || { echo "CHECKSUM MISMATCH ($GOT vs $WANT) - nothing written"; exit 1; }
+echo "ok: $WANT"
+echo "== erase + write /dev/mtd2 ($PAGES pages)"
+sh_ 'mount -o bind /dev /mnt/root/dev && chroot /mnt/root /usr/sbin/flash_erase /dev/mtd2 0 0 && nandwrite -p /dev/mtd2 /tmp/boot.img && echo written; umount /mnt/root/dev' | tail -3
+echo "== read back"
+BACK=$(sh_ "dd if=/dev/mtd2 bs=2048 count=$PAGES 2>/dev/null | sha256sum" | tail -1 | cut -d' ' -f1)
+if [ "$BACK" = "$WANT" ]; then
+    echo "VERIFIED: boot partition matches $IMG"
+else
+    echo "READBACK MISMATCH ($BACK) - do NOT reboot; use recovery"
+    exit 1
+fi
+if [ "$2" = "--reboot" ]; then
+    echo "== rebooting"
+    sh_ 'sync; reboot -f' >/dev/null 2>&1 || true
+fi
